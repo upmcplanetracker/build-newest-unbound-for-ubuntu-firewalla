@@ -84,7 +84,7 @@ jobs:
           apt-get update
           apt-get install -y --no-install-recommends             build-essential wget ca-certificates fakeroot dpkg-dev             libssl-dev libexpat1-dev libevent-dev libnghttp2-dev             libsystemd-dev libprotobuf-c-dev protobuf-c-compiler             libhiredis-dev libfstrm-dev libsodium-dev             python3 python3-dev swig doxygen             bison flex pkg-config
 
-          # libngtcp2-dev and libnghttp3-dev may not exist in 22.04 repos.
+          # libngtcp2-dev and libnghttp3-dev may not exist in older repos.
           # Try to install them, but don't fail the build if they're absent.
           apt-get install -y --no-install-recommends libngtcp2-dev libnghttp3-dev 2>/dev/null || true
 
@@ -105,11 +105,20 @@ jobs:
           # Tell configure which Python to use (Ubuntu only ships python3)
           export PYTHON_VERSION=3
 
-          # Conditionally enable DoQ (QUIC) support if the libraries are present
+          # Conditionally enable DoQ (QUIC) support only if:
+          # 1. The libraries are present, AND
+          # 2. OpenSSL has QUIC support (requires OpenSSL 3.2+)
           DOQ_FLAGS=""
           if pkg-config --exists libngtcp2 libnghttp3 2>/dev/null; then
-            DOQ_FLAGS="--with-libngtcp2 --with-libnghttp3"
-            echo "DoQ libraries found — enabling DNS-over-QUIC"
+            OPENSSL_VER=$(openssl version | awk '{print $2}')
+            OPENSSL_MAJOR=$(echo "$OPENSSL_VER" | cut -d. -f1)
+            OPENSSL_MINOR=$(echo "$OPENSSL_VER" | cut -d. -f2)
+            if [ "$OPENSSL_MAJOR" -gt 3 ] || { [ "$OPENSSL_MAJOR" -eq 3 ] && [ "$OPENSSL_MINOR" -ge 2 ]; }; then
+              DOQ_FLAGS="--with-libngtcp2 --with-libnghttp3"
+              echo "DoQ libraries found and OpenSSL ${OPENSSL_VER} has QUIC support — enabling DNS-over-QUIC"
+            else
+              echo "DoQ libraries found but OpenSSL ${OPENSSL_VER} lacks QUIC support (need 3.2+) — skipping DNS-over-QUIC"
+            fi
           else
             echo "DoQ libraries NOT found — skipping DNS-over-QUIC"
           fi
