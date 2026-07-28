@@ -2,7 +2,7 @@ name: Build Unbound .deb Packages
 
 on:
   schedule:
-    - cron: '0 6 * * *'   # Daily at 6 AM UTC
+    - cron: '0 6 * * *'
   workflow_dispatch:
     inputs:
       force_version:
@@ -12,6 +12,7 @@ on:
 
 env:
   UPSTREAM_REPO: NLnetLabs/unbound
+  DOWNLOAD_BASE: https://nlnetlabs.nl/downloads/unbound
 
 jobs:
   check-version:
@@ -28,18 +29,20 @@ jobs:
           if [ -n "${{ github.event.inputs.force_version }}" ]; then
             VERSION="${{ github.event.inputs.force_version }}"
           else
+            # Scrape GitHub API for latest release tag
             VERSION=$(curl -sSL "https://api.github.com/repos/${{ env.UPSTREAM_REPO }}/releases/latest" | \
               jq -r '.tag_name' | \
               sed 's/^release-//')
           fi
 
           UPSTREAM_TAG="release-${VERSION}"
-          TARBALL_URL="https://github.com/${{ env.UPSTREAM_REPO }}/releases/download/${UPSTREAM_TAG}/unbound-${VERSION}.tar.gz"
+          TARBALL_URL="${{ env.DOWNLOAD_BASE }}/unbound-${VERSION}.tar.gz"
 
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
           echo "upstream_tag=${UPSTREAM_TAG}" >> $GITHUB_OUTPUT
           echo "tarball_url=${TARBALL_URL}" >> $GITHUB_OUTPUT
           echo "Latest upstream version: ${VERSION}"
+          echo "Tarball URL: ${TARBALL_URL}"
 
       - name: Check against existing GitHub Releases
         id: check
@@ -92,8 +95,11 @@ jobs:
         run: |
           TARBALL_URL="${{ needs.check-version.outputs.tarball_url }}"
           VERSION="${{ needs.check-version.outputs.version }}"
-          wget -q "$TARBALL_URL" -O "unbound-${VERSION}.tar.gz"
+          echo "Downloading from: ${TARBALL_URL}"
+          wget --retry-connrefused --waitretry=1 --read-timeout=20 --timeout=15 -t 5 \
+            -q "$TARBALL_URL" -O "unbound-${VERSION}.tar.gz"
           tar xzf "unbound-${VERSION}.tar.gz"
+          ls -la "unbound-${VERSION}/"
 
       - name: Build Unbound
         run: |
@@ -143,10 +149,8 @@ jobs:
            Built from upstream tarball for ${SUFFIX}.
           EOF
 
-          # Copy installed files
           cp -a "${PKG_DIR}/." "${DEB_DIR}/" 2>/dev/null || true
 
-          # Ensure systemd service file exists
           if [ ! -f "${DEB_DIR}/lib/systemd/system/unbound.service" ] && [ ! -f "${DEB_DIR}/usr/lib/systemd/system/unbound.service" ]; then
             mkdir -p "${DEB_DIR}/lib/systemd/system"
             cat > "${DEB_DIR}/lib/systemd/system/unbound.service" <<'EOF'
@@ -169,7 +173,6 @@ jobs:
           EOF
           fi
 
-          # Ensure default environment file exists
           mkdir -p "${DEB_DIR}/etc/default"
           if [ ! -f "${DEB_DIR}/etc/default/unbound" ]; then
             cat > "${DEB_DIR}/etc/default/unbound" <<'EOF'
@@ -187,7 +190,7 @@ jobs:
           dpkg-deb -c "/tmp/unbound_${VERSION}-${SUFFIX}_${ARCH}.deb"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v4
         with:
           name: unbound-${{ needs.check-version.outputs.version }}-${{ matrix.pkg_suffix }}-amd64
           path: /tmp/unbound_${{ needs.check-version.outputs.version }}-${{ matrix.pkg_suffix }}_amd64.deb
@@ -201,14 +204,14 @@ jobs:
       contents: write
     steps:
       - name: Download all artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@v4
         with:
           path: ./artifacts
           pattern: unbound-${{ needs.check-version.outputs.version }}-*
           merge-multiple: true
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@v2
         with:
           tag_name: unbound-${{ needs.check-version.outputs.version }}
           name: "Unbound ${{ needs.check-version.outputs.version }}"
