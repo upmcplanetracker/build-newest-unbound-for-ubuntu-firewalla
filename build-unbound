@@ -1,0 +1,119 @@
+#!/bin/bash
+set -euo pipefail
+
+VERSION="${1:-1.25.2}"
+UBUNTU_VERSION="${2:-22.04}"
+TAG_NAME="release-${VERSION}"
+TARBALL_URL="https://nlnetlabs.nl/downloads/unbound/unbound-${VERSION}.tar.gz"
+OUTPUT_DIR="$(pwd)/output"
+mkdir -p "$OUTPUT_DIR"
+
+echo "Building Unbound ${VERSION} for Ubuntu ${UBUNTU_VERSION}..."
+
+docker run --rm   -e "VERSION=${VERSION}"   -e "TARBALL_URL=${TARBALL_URL}"   -e "UBUNTU_VERSION=${UBUNTU_VERSION}"   -v "${OUTPUT_DIR}:/output"   "ubuntu:${UBUNTU_VERSION}"   bash -c '
+    set -euo pipefail
+    export DEBIAN_FRONTEND=noninteractive
+
+    echo "Installing build dependencies..."
+    apt-get update
+    apt-get install -y --no-install-recommends       build-essential wget ca-certificates fakeroot dpkg-dev       libssl-dev libexpat1-dev libevent-dev libnghttp2-dev       libsystemd-dev libprotobuf-c-dev protobuf-c-compiler       libhiredis-dev libfstrm-dev libsodium-dev       python3-dev swig doxygen       bison flex pkg-config
+
+    # libngtcp2-dev and libnghttp3-dev may not exist in 22.04 repos
+    apt-get install -y --no-install-recommends libngtcp2-dev libnghttp3-dev 2>/dev/null || true
+
+    echo "Downloading Unbound ${VERSION}..."
+    wget --retry-connrefused --waitretry=1 --read-timeout=20 --timeout=15 -t 5       -q "$TARBALL_URL" -O "unbound-${VERSION}.tar.gz"
+    tar xzf "unbound-${VERSION}.tar.gz"
+    cd "unbound-${VERSION}"
+
+    echo "Configuring..."
+    DOQ_FLAGS=""
+    if pkg-config --exists libngtcp2 libnghttp3 2>/dev/null; then
+      DOQ_FLAGS="--with-libngtcp2 --with-libnghttp3"
+      echo "DoQ libraries found — enabling DNS-over-QUIC"
+    else
+      echo "DoQ libraries NOT found — skipping DNS-over-QUIC"
+    fi
+
+    ./configure       --prefix=/usr       --sysconfdir=/etc       --localstatedir=/var       --with-run-dir=/var/run/unbound       --with-username=unbound       --with-libevent       --with-libnghttp2       --with-ssl       --with-libhiredis       --enable-cachedb       --enable-dnscrypt       --enable-dnstap       --enable-subnet       --enable-ipsecmod       --enable-tfo-client       --enable-tfo-server       --enable-systemd       --enable-pie       --with-pythonmodule       --with-pyunbound       --disable-rpath       ${DOQ_FLAGS}       CFLAGS="-O2 -D_FORTIFY_SOURCE=2 -fstack-protector-strong -fPIE"       LDFLAGS="-Wl,-z,relro,-z,now -pie"
+
+    echo "Building..."
+    make -j$(nproc)
+
+    echo "Installing to staging area..."
+    mkdir -p /tmp/unbound-pkg
+    make DESTDIR=/tmp/unbound-pkg install
+
+    echo "Verifying build..."
+    BIN="/tmp/unbound-pkg/usr/sbin/unbound"
+    "${BIN}" -V
+    echo ""
+    echo "Linked libraries:"
+    ldd "${BIN}"
+
+    echo ""
+    echo "Packaging..."
+    PKG_DIR="/tmp/unbound-pkg"
+    DEB_DIR="/tmp/unbound-deb"
+    ARCH="amd64"
+    SUFFIX="ubuntu${UBUNTU_VERSION//./}"
+
+    mkdir -p "${DEB_DIR}/DEBIAN"
+
+    cat > "${DEB_DIR}/DEBIAN/control" <<EOF
+Package: unbound
+Version: ${VERSION}-${SUFFIX}
+Section: net
+Priority: optional
+Architecture: ${ARCH}
+Maintainer: Automated Build <build@localhost>
+Depends: libc6, libssl3, libexpat1, libevent-2.1-7, libnghttp2-14, libsystemd0, libprotobuf-c1, libhiredis1.1.0 | libhiredis1.1.0+ | libhiredis1.1.0-dev | libhiredis1.1.0t64, libfstrm0, libsodium23, python3
+Description: Validating, recursive, caching DNS resolver
+ Unbound is a validating, recursive, and caching DNS resolver.
+ Built from upstream tarball for Ubuntu ${UBUNTU_VERSION} with hardening flags.
+EOF
+
+    cp -a "${PKG_DIR}/." "${DEB_DIR}/" 2>/dev/null || true
+
+    mkdir -p "${DEB_DIR}/lib/systemd/system"
+    cat > "${DEB_DIR}/lib/systemd/system/unbound.service" <<EOF
+[Unit]
+Description=Unbound DNS server
+After=network.target
+Before=nss-lookup.target
+Wants=nss-lookup.target
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/default/unbound
+ExecStart=/usr/sbin/unbound -d \$DAEMON_OPTS
+ExecReload=/usr/sbin/unbound-control reload
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    mkdir -p "${DEB_DIR}/etc/default"
+    cat > "${DEB_DIR}/etc/default/unbound" <<EOF
+# Options for unbound
+DAEMON_OPTS=""
+EOF
+
+    dpkg-deb --root-owner-group --build "${DEB_DIR}"       "/tmp/unbound_${VERSION}-${SUFFIX}_${ARCH}.deb"
+
+    cd /tmp
+    sha256sum "unbound_${VERSION}-${SUFFIX}_${ARCH}.deb" > SHA256SUMS
+
+    cp "/tmp/unbound_${VERSION}-${SUFFIX}_${ARCH}.deb" /output/
+    cp "/tmp/SHA256SUMS" /output/SHA256SUMS-${SUFFIX}
+
+    echo ""
+    echo "Done."
+    echo "Package: /output/unbound_${VERSION}-${SUFFIX}_${ARCH}.deb"
+    echo "Checksums: /output/SHA256SUMS-${SUFFIX}"
+  '
+
+echo ""
+echo "Build complete. Output: ${OUTPUT_DIR}/"
+ls -la "${OUTPUT_DIR}/"
