@@ -3,39 +3,116 @@ set -euo pipefail
 
 VERSION="${1:-1.25.2}"
 UBUNTU_VERSION="${2:-22.04}"
-TAG_NAME="release-${VERSION}"
 TARBALL_URL="https://nlnetlabs.nl/downloads/unbound/unbound-${VERSION}.tar.gz"
+NGTCP2_VERSION="v1.13.0"
 OUTPUT_DIR="$(pwd)/output"
 mkdir -p "$OUTPUT_DIR"
 
 echo "Building Unbound ${VERSION} for Ubuntu ${UBUNTU_VERSION}..."
 
-docker run --rm   -e "VERSION=${VERSION}"   -e "TARBALL_URL=${TARBALL_URL}"   -e "UBUNTU_VERSION=${UBUNTU_VERSION}"   -v "${OUTPUT_DIR}:/output"   "ubuntu:${UBUNTU_VERSION}"   bash -c '
+docker run --rm \
+  -e "VERSION=${VERSION}" \
+  -e "TARBALL_URL=${TARBALL_URL}" \
+  -e "UBUNTU_VERSION=${UBUNTU_VERSION}" \
+  -e "NGTCP2_VERSION=${NGTCP2_VERSION}" \
+  -v "${OUTPUT_DIR}:/output" \
+  "ubuntu:${UBUNTU_VERSION}" \
+  bash -c '
     set -euo pipefail
     export DEBIAN_FRONTEND=noninteractive
 
     echo "Installing build dependencies..."
     apt-get update
-    apt-get install -y --no-install-recommends       build-essential wget ca-certificates fakeroot dpkg-dev       libssl-dev libexpat1-dev libevent-dev libnghttp2-dev       libsystemd-dev libprotobuf-c-dev protobuf-c-compiler       libhiredis-dev libfstrm-dev libsodium-dev       python3-dev swig doxygen       bison flex pkg-config
+    apt-get install -y --no-install-recommends \
+      build-essential wget ca-certificates fakeroot dpkg-dev \
+      libssl-dev libexpat1-dev libevent-dev libnghttp2-dev \
+      libsystemd-dev libprotobuf-c-dev protobuf-c-compiler \
+      libhiredis-dev libfstrm-dev libsodium-dev \
+      python3 python3-dev swig doxygen \
+      autoconf automake libtool pkg-config git \
+      bison flex
 
-    # libngtcp2-dev and libnghttp3-dev may not exist in 22.04 repos
-    apt-get install -y --no-install-recommends libngtcp2-dev libnghttp3-dev 2>/dev/null || true
+    echo ""
+    echo "=== Checking OpenSSL version ==="
+    OPENSSL_VER=$(openssl version | awk "{print \$2}")
+    OPENSSL_MAJOR=$(echo "$OPENSSL_VER" | cut -d. -f1)
+    OPENSSL_MINOR=$(echo "$OPENSSL_VER" | cut -d. -f2)
+    echo "Container OpenSSL: ${OPENSSL_VER}"
 
+    DOQ_SUPPORTED=false
+    if [ "$OPENSSL_MAJOR" -gt 3 ] || { [ "$OPENSSL_MAJOR" -eq 3 ] && [ "$OPENSSL_MINOR" -ge 5 ]; }; then
+      DOQ_SUPPORTED=true
+    fi
+
+    if [ "$DOQ_SUPPORTED" = "true" ]; then
+      echo "OpenSSL ${OPENSSL_VER} >= 3.5.0 — building ngtcp2 from source for DoQ"
+      git clone --depth 1 -b "$NGTCP2_VERSION" https://github.com/ngtcp2/ngtcp2 /tmp/ngtcp2-src
+      cd /tmp/ngtcp2-src
+      git submodule update --init --recursive
+      autoreconf -i
+      ./configure \
+        --prefix=/usr/local \
+        --enable-lib-only \
+        --with-openssl \
+        --disable-static
+      make -j$(nproc)
+      make install
+      ldconfig
+
+      if [ -f /usr/local/lib/libngtcp2_crypto_openssl.so ]; then
+        echo "ngtcp2 crypto helper built successfully"
+      else
+        echo "WARNING: ngtcp2 crypto helper missing — DoQ will be disabled"
+        DOQ_SUPPORTED=false
+      fi
+    else
+      echo "OpenSSL ${OPENSSL_VER} < 3.5.0 — skipping DoQ"
+    fi
+
+    echo ""
     echo "Downloading Unbound ${VERSION}..."
-    wget --retry-connrefused --waitretry=1 --read-timeout=20 --timeout=15 -t 5       -q "$TARBALL_URL" -O "unbound-${VERSION}.tar.gz"
+    cd /
+    wget --retry-connrefused --waitretry=1 --read-timeout=20 --timeout=15 -t 5 \
+      -q "$TARBALL_URL" -O "unbound-${VERSION}.tar.gz"
     tar xzf "unbound-${VERSION}.tar.gz"
     cd "unbound-${VERSION}"
 
     echo "Configuring..."
+    export PYTHON_VERSION=3
+
     DOQ_FLAGS=""
-    if pkg-config --exists libngtcp2 libnghttp3 2>/dev/null; then
-      DOQ_FLAGS="--with-libngtcp2 --with-libnghttp3"
-      echo "DoQ libraries found — enabling DNS-over-QUIC"
+    if [ "$DOQ_SUPPORTED" = "true" ]; then
+      DOQ_FLAGS="--with-libngtcp2"
+      echo "Enabling DNS-over-QUIC in Unbound"
     else
-      echo "DoQ libraries NOT found — skipping DNS-over-QUIC"
+      echo "DNS-over-QUIC disabled for this build"
     fi
 
-    ./configure       --prefix=/usr       --sysconfdir=/etc       --localstatedir=/var       --with-run-dir=/var/run/unbound       --with-username=unbound       --with-libevent       --with-libnghttp2       --with-ssl       --with-libhiredis       --enable-cachedb       --enable-dnscrypt       --enable-dnstap       --enable-subnet       --enable-ipsecmod       --enable-tfo-client       --enable-tfo-server       --enable-systemd       --enable-pie       --with-pythonmodule       --with-pyunbound       --disable-rpath       ${DOQ_FLAGS}       CFLAGS="-O2 -D_FORTIFY_SOURCE=2 -fstack-protector-strong -fPIE"       LDFLAGS="-Wl,-z,relro,-z,now -pie"
+    ./configure \
+      --prefix=/usr \
+      --sysconfdir=/etc \
+      --localstatedir=/var \
+      --with-run-dir=/var/run/unbound \
+      --with-username=unbound \
+      --with-libevent \
+      --with-libnghttp2 \
+      --with-ssl \
+      --with-libhiredis \
+      --enable-cachedb \
+      --enable-dnscrypt \
+      --enable-dnstap \
+      --enable-subnet \
+      --enable-ipsecmod \
+      --enable-tfo-client \
+      --enable-tfo-server \
+      --enable-systemd \
+      --enable-pie \
+      --with-pythonmodule \
+      --with-pyunbound \
+      --disable-rpath \
+      ${DOQ_FLAGS} \
+      CFLAGS="-O2 -D_FORTIFY_SOURCE=2 -fstack-protector-strong -fPIE" \
+      LDFLAGS="-Wl,-z,relro,-z,now -pie"
 
     echo "Building..."
     make -j$(nproc)
@@ -44,6 +121,7 @@ docker run --rm   -e "VERSION=${VERSION}"   -e "TARBALL_URL=${TARBALL_URL}"   -e
     mkdir -p /tmp/unbound-pkg
     make DESTDIR=/tmp/unbound-pkg install
 
+    echo ""
     echo "Verifying build..."
     BIN="/tmp/unbound-pkg/usr/sbin/unbound"
     "${BIN}" -V
@@ -75,8 +153,15 @@ EOF
 
     cp -a "${PKG_DIR}/." "${DEB_DIR}/" 2>/dev/null || true
 
+    # Bundle ngtcp2 libs if DoQ was built
+    if [ -f /usr/local/lib/libngtcp2.so ]; then
+      echo "Bundling ngtcp2 libraries into .deb"
+      mkdir -p "${DEB_DIR}/usr/local/lib"
+      cp -a /usr/local/lib/libngtcp2*.so* "${DEB_DIR}/usr/local/lib/" 2>/dev/null || true
+    fi
+
     mkdir -p "${DEB_DIR}/lib/systemd/system"
-    cat > "${DEB_DIR}/lib/systemd/system/unbound.service" <<EOF
+    cat > "${DEB_DIR}/lib/systemd/system/unbound.service" <<'SVCEOF'
 [Unit]
 Description=Unbound DNS server
 After=network.target
@@ -86,21 +171,28 @@ Wants=nss-lookup.target
 [Service]
 Type=simple
 EnvironmentFile=-/etc/default/unbound
-ExecStart=/usr/sbin/unbound -d \$DAEMON_OPTS
+ExecStart=/usr/sbin/unbound -d $DAEMON_OPTS
 ExecReload=/usr/sbin/unbound-control reload
 Restart=on-failure
 
 [Install]
 WantedBy=multi-user.target
-EOF
+SVCEOF
 
     mkdir -p "${DEB_DIR}/etc/default"
-    cat > "${DEB_DIR}/etc/default/unbound" <<EOF
+    cat > "${DEB_DIR}/etc/default/unbound" <<'DEFEOF'
 # Options for unbound
 DAEMON_OPTS=""
-EOF
+DEFEOF
 
-    dpkg-deb --root-owner-group --build "${DEB_DIR}"       "/tmp/unbound_${VERSION}-${SUFFIX}_${ARCH}.deb"
+    # ldconfig hook for bundled ngtcp2 libs
+    if [ -f /usr/local/lib/libngtcp2.so ]; then
+      mkdir -p "${DEB_DIR}/etc/ld.so.conf.d"
+      echo "/usr/local/lib" > "${DEB_DIR}/etc/ld.so.conf.d/local-ngtcp2.conf"
+    fi
+
+    dpkg-deb --root-owner-group --build "${DEB_DIR}" \
+      "/tmp/unbound_${VERSION}-${SUFFIX}_${ARCH}.deb"
 
     cd /tmp
     sha256sum "unbound_${VERSION}-${SUFFIX}_${ARCH}.deb" > SHA256SUMS
