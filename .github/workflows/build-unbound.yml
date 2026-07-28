@@ -13,6 +13,8 @@ on:
 env:
   UPSTREAM_REPO: NLnetLabs/unbound
   DOWNLOAD_BASE: https://nlnetlabs.nl/downloads/unbound
+  # ngtcp2 version to build from source (must be >= 1.13.0 for Unbound DoQ)
+  NGTCP2_VERSION: v1.13.0
 
 jobs:
   check-version:
@@ -82,11 +84,50 @@ jobs:
         run: |
           export DEBIAN_FRONTEND=noninteractive
           apt-get update
-          apt-get install -y --no-install-recommends             build-essential wget ca-certificates fakeroot dpkg-dev             libssl-dev libexpat1-dev libevent-dev libnghttp2-dev             libsystemd-dev libprotobuf-c-dev protobuf-c-compiler             libhiredis-dev libfstrm-dev libsodium-dev             python3 python3-dev swig doxygen             bison flex pkg-config
+          apt-get install -y --no-install-recommends             build-essential wget ca-certificates fakeroot dpkg-dev             libssl-dev libexpat1-dev libevent-dev libnghttp2-dev             libsystemd-dev libprotobuf-c-dev protobuf-c-compiler             libhiredis-dev libfstrm-dev libsodium-dev             python3 python3-dev swig doxygen             autoconf automake libtool pkg-config git             bison flex
 
-          # libngtcp2-dev and libnghttp3-dev may not exist in older repos.
-          # Try to install them, but don't fail the build if they're absent.
-          apt-get install -y --no-install-recommends libngtcp2-dev libnghttp3-dev 2>/dev/null || true
+      - name: Check OpenSSL version and build ngtcp2 from source
+        run: |
+          OPENSSL_VER=$(openssl version | awk '{print $2}')
+          OPENSSL_MAJOR=$(echo "$OPENSSL_VER" | cut -d. -f1)
+          OPENSSL_MINOR=$(echo "$OPENSSL_VER" | cut -d. -f2)
+          OPENSSL_PATCH=$(echo "$OPENSSL_VER" | cut -d. -f3)
+
+          echo "Container OpenSSL version: ${OPENSSL_VER}"
+
+          # Unbound DoQ requires OpenSSL >= 3.5.0
+          DOQ_SUPPORTED=false
+          if [ "$OPENSSL_MAJOR" -gt 3 ] || { [ "$OPENSSL_MAJOR" -eq 3 ] && [ "$OPENSSL_MINOR" -ge 5 ]; }; then
+            DOQ_SUPPORTED=true
+          fi
+
+          if [ "$DOQ_SUPPORTED" = "true" ]; then
+            echo "OpenSSL ${OPENSSL_VER} >= 3.5.0 — building ngtcp2 from source for DoQ support"
+
+            # Build ngtcp2 from source against this container's exact OpenSSL.
+            # We use --enable-lib-only to skip examples (which need nghttp3/libev).
+            # The crypto helper (libngtcp2_crypto_openssl) is built with --with-openssl.
+            git clone --depth 1 -b ${{ env.NGTCP2_VERSION }} https://github.com/ngtcp2/ngtcp2 /tmp/ngtcp2-src
+            cd /tmp/ngtcp2-src
+            git submodule update --init --recursive
+            autoreconf -i
+            ./configure               --prefix=/usr/local               --enable-lib-only               --with-openssl               --disable-static
+            make -j$(nproc)
+            make install
+            ldconfig
+
+            # Verify the crypto helper was built
+            if [ -f /usr/local/lib/libngtcp2_crypto_openssl.so ]; then
+              echo "ngtcp2 crypto helper built successfully"
+              echo "doq_enabled=true" >> $GITHUB_OUTPUT
+            else
+              echo "WARNING: ngtcp2 crypto helper missing — DoQ will be disabled"
+              echo "doq_enabled=false" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "OpenSSL ${OPENSSL_VER} < 3.5.0 — skipping DoQ (ngtcp2 not needed)"
+            echo "doq_enabled=false" >> $GITHUB_OUTPUT
+          fi
 
       - name: Download Unbound source
         run: |
@@ -105,22 +146,13 @@ jobs:
           # Tell configure which Python to use (Ubuntu only ships python3)
           export PYTHON_VERSION=3
 
-          # Conditionally enable DoQ (QUIC) support only if:
-          # 1. The libraries are present, AND
-          # 2. OpenSSL has QUIC support (requires OpenSSL 3.2+)
+          # Conditionally enable DoQ if ngtcp2 was built from source
           DOQ_FLAGS=""
-          if pkg-config --exists libngtcp2 libnghttp3 2>/dev/null; then
-            OPENSSL_VER=$(openssl version | awk '{print $2}')
-            OPENSSL_MAJOR=$(echo "$OPENSSL_VER" | cut -d. -f1)
-            OPENSSL_MINOR=$(echo "$OPENSSL_VER" | cut -d. -f2)
-            if [ "$OPENSSL_MAJOR" -gt 3 ] || { [ "$OPENSSL_MAJOR" -eq 3 ] && [ "$OPENSSL_MINOR" -ge 2 ]; }; then
-              DOQ_FLAGS="--with-libngtcp2 --with-libnghttp3"
-              echo "DoQ libraries found and OpenSSL ${OPENSSL_VER} has QUIC support — enabling DNS-over-QUIC"
-            else
-              echo "DoQ libraries found but OpenSSL ${OPENSSL_VER} lacks QUIC support (need 3.2+) — skipping DNS-over-QUIC"
-            fi
+          if [ "${{ steps.build-ngtcp2.outputs.doq_enabled }}" = "true" ]; then
+            DOQ_FLAGS="--with-libngtcp2"
+            echo "Enabling DNS-over-QUIC in Unbound"
           else
-            echo "DoQ libraries NOT found — skipping DNS-over-QUIC"
+            echo "DNS-over-QUIC disabled for this build"
           fi
 
           ./configure             --prefix=/usr             --sysconfdir=/etc             --localstatedir=/var             --with-run-dir=/var/run/unbound             --with-username=unbound             --with-libevent             --with-libnghttp2             --with-ssl             --with-libhiredis             --enable-cachedb             --enable-dnscrypt             --enable-dnstap             --enable-subnet             --enable-ipsecmod             --enable-tfo-client             --enable-tfo-server             --enable-systemd             --enable-pie             --with-pythonmodule             --with-pyunbound             --disable-rpath             ${DOQ_FLAGS}             CFLAGS="-O2 -D_FORTIFY_SOURCE=2 -fstack-protector-strong -fPIE"             LDFLAGS="-Wl,-z,relro,-z,now -pie"
@@ -143,7 +175,6 @@ jobs:
 
           echo ""
           echo "=== Config check (syntax only) ==="
-          # Create a minimal config so unbound-checkconf doesn't bail on missing files
           mkdir -p /tmp/unbound-pkg/etc/unbound
           cat > /tmp/unbound-pkg/etc/unbound/unbound.conf <<'EOF'
           server:
@@ -185,6 +216,14 @@ jobs:
 
           cp -a "${PKG_DIR}/." "${DEB_DIR}/" 2>/dev/null || true
 
+          # If DoQ was built, ngtcp2 libs were installed to /usr/local/lib.
+          # Bundle them into the .deb so the package is self-contained.
+          if [ -f /usr/local/lib/libngtcp2.so ]; then
+            echo "Bundling ngtcp2 libraries into .deb"
+            mkdir -p "${DEB_DIR}/usr/local/lib"
+            cp -a /usr/local/lib/libngtcp2*.so* "${DEB_DIR}/usr/local/lib/" 2>/dev/null || true
+          fi
+
           if [ ! -f "${DEB_DIR}/lib/systemd/system/unbound.service" ] && [ ! -f "${DEB_DIR}/usr/lib/systemd/system/unbound.service" ]; then
             mkdir -p "${DEB_DIR}/lib/systemd/system"
             cat > "${DEB_DIR}/lib/systemd/system/unbound.service" <<'EOF'
@@ -213,6 +252,12 @@ jobs:
           # Options for unbound
           DAEMON_OPTS=""
           EOF
+          fi
+
+          # Add ldconfig hook so /usr/local/lib is searchable at runtime
+          mkdir -p "${DEB_DIR}/etc/ld.so.conf.d"
+          if [ -f /usr/local/lib/libngtcp2.so ]; then
+            echo "/usr/local/lib" > "${DEB_DIR}/etc/ld.so.conf.d/local-ngtcp2.conf"
           fi
 
           dpkg-deb --root-owner-group --build "${DEB_DIR}"             "/tmp/unbound_${VERSION}-${SUFFIX}_${ARCH}.deb"
