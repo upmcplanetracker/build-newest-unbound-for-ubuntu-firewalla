@@ -29,10 +29,7 @@ jobs:
           if [ -n "${{ github.event.inputs.force_version }}" ]; then
             VERSION="${{ github.event.inputs.force_version }}"
           else
-            # Scrape GitHub API for latest release tag
-            VERSION=$(curl -sSL "https://api.github.com/repos/${{ env.UPSTREAM_REPO }}/releases/latest" | \
-              jq -r '.tag_name' | \
-              sed 's/^release-//')
+            VERSION=$(curl -sSL "https://api.github.com/repos/${{ env.UPSTREAM_REPO }}/releases/latest" |               jq -r '.tag_name' |               sed 's/^release-//')
           fi
 
           UPSTREAM_TAG="release-${VERSION}"
@@ -85,19 +82,18 @@ jobs:
         run: |
           export DEBIAN_FRONTEND=noninteractive
           apt-get update
-          apt-get install -y --no-install-recommends \
-            build-essential wget ca-certificates fakeroot dpkg-dev \
-            libssl-dev libexpat1-dev libevent-dev libnghttp2-dev \
-            libsystemd-dev libprotobuf-c-dev protobuf-c-compiler \
-            bison flex pkg-config
+          apt-get install -y --no-install-recommends             build-essential wget ca-certificates fakeroot dpkg-dev             libssl-dev libexpat1-dev libevent-dev libnghttp2-dev             libsystemd-dev libprotobuf-c-dev protobuf-c-compiler             libhiredis-dev libfstrm-dev libsodium-dev             python3-dev swig doxygen             bison flex pkg-config
+
+          # libngtcp2-dev and libnghttp3-dev may not exist in 22.04 repos.
+          # Try to install them, but don't fail the build if they're absent.
+          apt-get install -y --no-install-recommends libngtcp2-dev libnghttp3-dev 2>/dev/null || true
 
       - name: Download Unbound source
         run: |
           TARBALL_URL="${{ needs.check-version.outputs.tarball_url }}"
           VERSION="${{ needs.check-version.outputs.version }}"
           echo "Downloading from: ${TARBALL_URL}"
-          wget --retry-connrefused --waitretry=1 --read-timeout=20 --timeout=15 -t 5 \
-            -q "$TARBALL_URL" -O "unbound-${VERSION}.tar.gz"
+          wget --retry-connrefused --waitretry=1 --read-timeout=20 --timeout=15 -t 5             -q "$TARBALL_URL" -O "unbound-${VERSION}.tar.gz"
           tar xzf "unbound-${VERSION}.tar.gz"
           ls -la "unbound-${VERSION}/"
 
@@ -106,21 +102,46 @@ jobs:
           VERSION="${{ needs.check-version.outputs.version }}"
           cd "unbound-${VERSION}"
 
-          ./configure \
-            --prefix=/usr \
-            --sysconfdir=/etc \
-            --localstatedir=/var \
-            --with-run-dir=/var/run/unbound \
-            --with-username=unbound \
-            --with-libevent \
-            --with-libnghttp2 \
-            --with-ssl \
-            --enable-systemd \
-            --disable-rpath
+          # Conditionally enable DoQ (QUIC) support if the libraries are present
+          DOQ_FLAGS=""
+          if pkg-config --exists libngtcp2 libnghttp3 2>/dev/null; then
+            DOQ_FLAGS="--with-libngtcp2 --with-libnghttp3"
+            echo "DoQ libraries found — enabling DNS-over-QUIC"
+          else
+            echo "DoQ libraries NOT found — skipping DNS-over-QUIC"
+          fi
+
+          ./configure             --prefix=/usr             --sysconfdir=/etc             --localstatedir=/var             --with-run-dir=/var/run/unbound             --with-username=unbound             --with-libevent             --with-libnghttp2             --with-ssl             --with-libhiredis             --enable-cachedb             --enable-dnscrypt             --enable-dnstap             --enable-subnet             --enable-ipsecmod             --enable-tfo-client             --enable-tfo-server             --enable-systemd             --enable-pie             --with-pythonmodule             --with-pyunbound             --disable-rpath             ${DOQ_FLAGS}             CFLAGS="-O2 -D_FORTIFY_SOURCE=2 -fstack-protector-strong -fPIE"             LDFLAGS="-Wl,-z,relro,-z,now -pie"
 
           make -j$(nproc)
           mkdir -p /tmp/unbound-pkg
           make DESTDIR=/tmp/unbound-pkg install
+
+      - name: Verify build and modules
+        run: |
+          VERSION="${{ needs.check-version.outputs.version }}"
+          BIN="/tmp/unbound-pkg/usr/sbin/unbound"
+
+          echo "=== Unbound version and modules ==="
+          "${BIN}" -V
+
+          echo ""
+          echo "=== Linked libraries ==="
+          ldd "${BIN}"
+
+          echo ""
+          echo "=== Config check (syntax only) ==="
+          # Create a minimal config so unbound-checkconf doesn't bail on missing files
+          mkdir -p /tmp/unbound-pkg/etc/unbound
+          cat > /tmp/unbound-pkg/etc/unbound/unbound.conf <<'EOF'
+          server:
+              verbosity: 1
+              interface: 127.0.0.1
+              port: 53
+              username: "unbound"
+              directory: "/etc/unbound"
+          EOF
+          "${BIN}"-checkconf /tmp/unbound-pkg/etc/unbound/unbound.conf || true
 
       - name: Create .deb package
         run: |
@@ -139,14 +160,15 @@ jobs:
           Priority: optional
           Architecture: ${ARCH}
           Maintainer: Automated Build <build@localhost>
-          Depends: libc6, libssl3, libexpat1, libevent-2.1-7, libnghttp2-14, libsystemd0, libprotobuf-c1
+          Depends: libc6, libssl3, libexpat1, libevent-2.1-7, libnghttp2-14, libsystemd0, libprotobuf-c1, libhiredis1.1.0 | libhiredis1.1.0+ | libhiredis1.1.0-dev | libhiredis1.1.0t64, libfstrm0, libsodium23, python3
           Description: Validating, recursive, caching DNS resolver
            Unbound is a validating, recursive, and caching DNS resolver.
            It is designed as a set of modular components that incorporate
            modern features, such as enhanced security (DNSSEC) validation,
-           Internet Protocol Version 6 (IPv6), and a client resolver
-           library API as an integral part of the architecture.
-           Built from upstream tarball for ${SUFFIX}.
+           Internet Protocol Version 6 (IPv6), EDNS Client Subnet, DNS-over-HTTPS,
+           DNS-over-QUIC (where supported), dnstap, Redis cachedb, and a client
+           resolver library API as an integral part of the architecture.
+           Built from upstream tarball for ${SUFFIX} with hardening flags.
           EOF
 
           cp -a "${PKG_DIR}/." "${DEB_DIR}/" 2>/dev/null || true
@@ -181,19 +203,26 @@ jobs:
           EOF
           fi
 
-          dpkg-deb --root-owner-group --build "${DEB_DIR}" \
-            "/tmp/unbound_${VERSION}-${SUFFIX}_${ARCH}.deb"
+          dpkg-deb --root-owner-group --build "${DEB_DIR}"             "/tmp/unbound_${VERSION}-${SUFFIX}_${ARCH}.deb"
 
           echo "=== Package info ==="
           dpkg-deb -I "/tmp/unbound_${VERSION}-${SUFFIX}_${ARCH}.deb"
           echo "=== Package contents ==="
           dpkg-deb -c "/tmp/unbound_${VERSION}-${SUFFIX}_${ARCH}.deb"
 
+      - name: Generate checksum
+        run: |
+          cd /tmp
+          sha256sum "unbound_${{ needs.check-version.outputs.version }}-${{ matrix.pkg_suffix }}_amd64.deb" > "SHA256SUMS-${{ matrix.pkg_suffix }}"
+          cat "SHA256SUMS-${{ matrix.pkg_suffix }}"
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: unbound-${{ needs.check-version.outputs.version }}-${{ matrix.pkg_suffix }}-amd64
-          path: /tmp/unbound_${{ needs.check-version.outputs.version }}-${{ matrix.pkg_suffix }}_amd64.deb
+          path: |
+            /tmp/unbound_${{ needs.check-version.outputs.version }}-${{ matrix.pkg_suffix }}_amd64.deb
+            /tmp/SHA256SUMS-${{ matrix.pkg_suffix }}
           retention-days: 90
 
   release:
@@ -209,6 +238,13 @@ jobs:
           path: ./artifacts
           pattern: unbound-${{ needs.check-version.outputs.version }}-*
           merge-multiple: true
+
+      - name: Merge checksums
+        run: |
+          cd ./artifacts
+          cat SHA256SUMS-* > SHA256SUMS
+          rm -f SHA256SUMS-*
+          cat SHA256SUMS
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -237,5 +273,11 @@ jobs:
             sudo chown unbound:unbound /var/run/unbound
             sudo systemctl enable --now unbound
             ```
-          files: ./artifacts/*.deb
+
+            **Verify the package:**
+            ```bash
+            sha256sum -c SHA256SUMS
+            unbound -V
+            ```
+          files: ./artifacts/*
           fail_on_unmatched_files: true
