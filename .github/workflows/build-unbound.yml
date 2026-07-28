@@ -1,0 +1,238 @@
+name: Build Unbound .deb Packages
+
+on:
+  schedule:
+    - cron: '0 6 * * *'   # Daily at 6 AM UTC
+  workflow_dispatch:
+    inputs:
+      force_version:
+        description: 'Force build a specific version (e.g., 1.25.2)'
+        required: false
+        default: ''
+
+env:
+  UPSTREAM_REPO: NLnetLabs/unbound
+
+jobs:
+  check-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.parse.outputs.version }}
+      upstream_tag: ${{ steps.parse.outputs.upstream_tag }}
+      tarball_url: ${{ steps.parse.outputs.tarball_url }}
+      should_build: ${{ steps.check.outputs.should_build }}
+    steps:
+      - name: Determine latest Unbound version
+        id: parse
+        run: |
+          if [ -n "${{ github.event.inputs.force_version }}" ]; then
+            VERSION="${{ github.event.inputs.force_version }}"
+          else
+            VERSION=$(curl -sSL "https://api.github.com/repos/${{ env.UPSTREAM_REPO }}/releases/latest" | \
+              jq -r '.tag_name' | \
+              sed 's/^release-//')
+          fi
+
+          UPSTREAM_TAG="release-${VERSION}"
+          TARBALL_URL="https://github.com/${{ env.UPSTREAM_REPO }}/releases/download/${UPSTREAM_TAG}/unbound-${VERSION}.tar.gz"
+
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "upstream_tag=${UPSTREAM_TAG}" >> $GITHUB_OUTPUT
+          echo "tarball_url=${TARBALL_URL}" >> $GITHUB_OUTPUT
+          echo "Latest upstream version: ${VERSION}"
+
+      - name: Check against existing GitHub Releases
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${{ steps.parse.outputs.version }}"
+          TAG_NAME="unbound-${VERSION}"
+
+          LATEST_RELEASE_TAG=$(gh release list --repo ${{ github.repository }} --limit 1 --json tagName --jq '.[0].tagName' 2>/dev/null || echo "")
+
+          echo "Latest release tag: ${LATEST_RELEASE_TAG}"
+          echo "Target tag: ${TAG_NAME}"
+
+          if [ "$LATEST_RELEASE_TAG" = "$TAG_NAME" ] && [ -z "${{ github.event.inputs.force_version }}" ]; then
+            echo "Release ${TAG_NAME} already exists. Skipping."
+            echo "should_build=false" >> $GITHUB_OUTPUT
+          else
+            echo "Release ${TAG_NAME} is new or forced. Building."
+            echo "should_build=true" >> $GITHUB_OUTPUT
+          fi
+
+  build-deb:
+    needs: check-version
+    if: needs.check-version.outputs.should_build == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - ubuntu_version: "22.04"
+            pkg_suffix: "ubuntu22.04"
+          - ubuntu_version: "26.04"
+            pkg_suffix: "ubuntu26.04"
+
+    runs-on: ubuntu-latest
+    container: ubuntu:${{ matrix.ubuntu_version }}
+
+    steps:
+      - name: Install build dependencies
+        run: |
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential wget ca-certificates fakeroot dpkg-dev \
+            libssl-dev libexpat1-dev libevent-dev libnghttp2-dev \
+            libsystemd-dev libprotobuf-c-dev protobuf-c-compiler \
+            bison flex pkg-config
+
+      - name: Download Unbound source
+        run: |
+          TARBALL_URL="${{ needs.check-version.outputs.tarball_url }}"
+          VERSION="${{ needs.check-version.outputs.version }}"
+          wget -q "$TARBALL_URL" -O "unbound-${VERSION}.tar.gz"
+          tar xzf "unbound-${VERSION}.tar.gz"
+
+      - name: Build Unbound
+        run: |
+          VERSION="${{ needs.check-version.outputs.version }}"
+          cd "unbound-${VERSION}"
+
+          ./configure \
+            --prefix=/usr \
+            --sysconfdir=/etc \
+            --localstatedir=/var \
+            --with-run-dir=/var/run/unbound \
+            --with-username=unbound \
+            --with-libevent \
+            --with-libnghttp2 \
+            --with-ssl \
+            --enable-systemd \
+            --disable-rpath
+
+          make -j$(nproc)
+          mkdir -p /tmp/unbound-pkg
+          make DESTDIR=/tmp/unbound-pkg install
+
+      - name: Create .deb package
+        run: |
+          VERSION="${{ needs.check-version.outputs.version }}"
+          SUFFIX="${{ matrix.pkg_suffix }}"
+          PKG_DIR="/tmp/unbound-pkg"
+          DEB_DIR="/tmp/unbound-deb"
+          ARCH="amd64"
+
+          mkdir -p "${DEB_DIR}/DEBIAN"
+
+          cat > "${DEB_DIR}/DEBIAN/control" <<EOF
+          Package: unbound
+          Version: ${VERSION}-${SUFFIX}
+          Section: net
+          Priority: optional
+          Architecture: ${ARCH}
+          Maintainer: Automated Build <build@localhost>
+          Depends: libc6, libssl3, libexpat1, libevent-2.1-7, libnghttp2-14, libsystemd0, libprotobuf-c1
+          Description: Validating, recursive, caching DNS resolver
+           Unbound is a validating, recursive, and caching DNS resolver.
+           It is designed as a set of modular components that incorporate
+           modern features, such as enhanced security (DNSSEC) validation,
+           Internet Protocol Version 6 (IPv6), and a client resolver
+           library API as an integral part of the architecture.
+           Built from upstream tarball for ${SUFFIX}.
+          EOF
+
+          # Copy installed files
+          cp -a "${PKG_DIR}/." "${DEB_DIR}/" 2>/dev/null || true
+
+          # Ensure systemd service file exists
+          if [ ! -f "${DEB_DIR}/lib/systemd/system/unbound.service" ] && [ ! -f "${DEB_DIR}/usr/lib/systemd/system/unbound.service" ]; then
+            mkdir -p "${DEB_DIR}/lib/systemd/system"
+            cat > "${DEB_DIR}/lib/systemd/system/unbound.service" <<'EOF'
+          [Unit]
+          Description=Unbound DNS server
+          Documentation=man:unbound(8)
+          After=network.target
+          Before=nss-lookup.target
+          Wants=nss-lookup.target
+
+          [Service]
+          Type=simple
+          EnvironmentFile=-/etc/default/unbound
+          ExecStart=/usr/sbin/unbound -d $DAEMON_OPTS
+          ExecReload=/usr/sbin/unbound-control reload
+          Restart=on-failure
+
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+          fi
+
+          # Ensure default environment file exists
+          mkdir -p "${DEB_DIR}/etc/default"
+          if [ ! -f "${DEB_DIR}/etc/default/unbound" ]; then
+            cat > "${DEB_DIR}/etc/default/unbound" <<'EOF'
+          # Options for unbound
+          DAEMON_OPTS=""
+          EOF
+          fi
+
+          dpkg-deb --root-owner-group --build "${DEB_DIR}" \
+            "/tmp/unbound_${VERSION}-${SUFFIX}_${ARCH}.deb"
+
+          echo "=== Package info ==="
+          dpkg-deb -I "/tmp/unbound_${VERSION}-${SUFFIX}_${ARCH}.deb"
+          echo "=== Package contents ==="
+          dpkg-deb -c "/tmp/unbound_${VERSION}-${SUFFIX}_${ARCH}.deb"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: unbound-${{ needs.check-version.outputs.version }}-${{ matrix.pkg_suffix }}-amd64
+          path: /tmp/unbound_${{ needs.check-version.outputs.version }}-${{ matrix.pkg_suffix }}_amd64.deb
+          retention-days: 90
+
+  release:
+    needs: [check-version, build-deb]
+    if: needs.check-version.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ./artifacts
+          pattern: unbound-${{ needs.check-version.outputs.version }}-*
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: unbound-${{ needs.check-version.outputs.version }}
+          name: "Unbound ${{ needs.check-version.outputs.version }}"
+          body: |
+            Automated build of Unbound ${{ needs.check-version.outputs.version }} for Ubuntu.
+
+            | File | Target |
+            |------|--------|
+            | `unbound_${{ needs.check-version.outputs.version }}-ubuntu22.04_amd64.deb` | Ubuntu 22.04 (Jammy) |
+            | `unbound_${{ needs.check-version.outputs.version }}-ubuntu26.04_amd64.deb` | Ubuntu 26.04 |
+
+            **Firewalla note:** The Ubuntu 22.04 package should also work on 26.04 due to glibc backward compatibility. Install with:
+            ```bash
+            sudo dpkg -i unbound_*.deb
+            # or
+            sudo apt install ./unbound_*.deb
+            ```
+
+            **Post-install:** Ensure the `unbound` user exists before starting the service:
+            ```bash
+            sudo useradd -r -s /bin/false unbound 2>/dev/null || true
+            sudo mkdir -p /var/run/unbound
+            sudo chown unbound:unbound /var/run/unbound
+            sudo systemctl enable --now unbound
+            ```
+          files: ./artifacts/*.deb
+          fail_on_unmatched_files: true
