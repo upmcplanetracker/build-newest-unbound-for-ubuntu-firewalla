@@ -5,11 +5,11 @@ Automatically downloads the latest stable [Unbound](https://nlnetlabs.nl/project
 ## What this does
 
 - **Scans daily** for new Unbound releases at [nlnetlabs.nl](https://nlnetlabs.nl/downloads/unbound/)
-- **Skips pre-releases**  only builds stable versions
-- **Builds in clean Docker containers** for both Ubuntu 22.04 and 26.04 (amd64)
+- **Skips pre-releases** — only builds stable versions
+- **Builds for both Ubuntu 22.04 and 26.04** (amd64) using clean, isolated environments
 - **Creates a GitHub Release** automatically with the `.deb` files and `SHA256SUMS` attached
-- **No manual tracking file**  compares against existing GitHub Releases to avoid duplicate builds
-- **Build verification**  confirms linked libraries, loaded modules, and config syntax before packaging
+- **No manual tracking file** — compares against existing GitHub Releases to avoid duplicate builds
+- **Build verification** — confirms linked libraries, loaded modules, and config syntax before packaging
 
 ## Download the latest package
 
@@ -51,7 +51,7 @@ sudo systemctl enable --now unbound
 
 ---
 
-## FIREWALLA WARNING: READ THIS
+## ⚠️ FIREWALLA WARNING — READ THIS
 
 > **DO NOT install this package on Firewalla unless you really know what you're doing.**
 
@@ -119,14 +119,14 @@ Unbound is compiled with an extensive feature set:
 
 ### DNS-over-QUIC (DoQ)
 
-DoQ support is **conditional** and depends on the OpenSSL version in the build container:
+DoQ support is **conditional** and depends on the OpenSSL version in the build environment:
 
 | Ubuntu version | OpenSSL | DoQ |
 |----------------|---------|-----|
 | 22.04 | ~3.0.x | ❌ Not available |
 | 26.04 | **3.5.5** | ✅ **Enabled** |
 
-When DoQ is enabled, the workflow builds [ngtcp2](https://github.com/ngtcp2/ngtcp2) **from source** inside the same Docker container. This guarantees the ngtcp2 crypto helper is compiled against the exact OpenSSL version present, avoiding the API mismatches that occur when using pre-built distro packages.
+When DoQ is enabled, the workflow builds [ngtcp2](https://github.com/ngtcp2/ngtcp2) **from source** inside the same build environment. This guarantees the ngtcp2 crypto helper is compiled against the exact OpenSSL version present, avoiding the API mismatches that occur when using pre-built distro packages.
 
 The resulting `.deb` bundles the ngtcp2 shared libraries (`libngtcp2.so`, `libngtcp2_crypto_openssl.so`) into `/usr/local/lib` and includes an `ld.so.conf.d` hook so the dynamic linker finds them at runtime. No manual library installation is required.
 
@@ -134,9 +134,9 @@ The resulting `.deb` bundles the ngtcp2 shared libraries (`libngtcp2.so`, `libng
 
 Before packaging, the workflow validates:
 
-1. **`unbound -V`**  prints the version and lists all compiled-in modules
-2. **`ldd unbound`**  confirms all shared libraries resolve correctly at runtime
-3. **`unbound-checkconf`**  validates a minimal config file for syntax errors
+1. **`unbound -V`** — prints the version and lists all compiled-in modules
+2. **`ldd unbound`** — confirms all shared libraries resolve correctly at runtime
+3. **`unbound-checkconf`** — validates a minimal config file for syntax errors
 
 If any of these fail, the build stops before a broken `.deb` is published.
 
@@ -165,9 +165,9 @@ You can force a build at any time:
 |------|---------|
 | **Check** | Queries the NLnet Labs download page for the latest stable version |
 | **Compare** | Queries existing GitHub Releases to see if it's already been built |
-| **OpenSSL check** | Determines if the container has OpenSSL ≥ 3.5.0 (required for DoQ) |
-| **Build ngtcp2** | If DoQ is viable, clones ngtcp2 `v1.13.0` and builds it from source against the container's OpenSSL |
-| **Build** | Spins up `ubuntu:22.04` and `ubuntu:26.04` containers, installs build deps, compiles Unbound from the upstream tarball |
+| **OpenSSL check** | Determines if the environment has OpenSSL ≥ 3.5.0 (required for DoQ) |
+| **Build ngtcp2** | If DoQ is viable, clones ngtcp2 `v1.13.0` and builds it from source against the environment's OpenSSL |
+| **Build** | Installs build deps, compiles Unbound from the upstream tarball |
 | **Verify** | Runs `unbound -V`, `ldd`, and `unbound-checkconf` to confirm a healthy binary |
 | **Package** | Uses `dpkg-deb` to create proper `.deb` packages with a systemd service file; bundles ngtcp2 libs if applicable |
 | **Checksum** | Generates `sha256sum` for each package |
@@ -186,11 +186,11 @@ chmod +x build-unbound
 ./build-unbound 1.25.2 26.04      # specific version and OS
 ```
 
-This runs the same build inside a clean Docker container and drops the `.deb` and `SHA256SUMS` into `./output/`.
+This runs the same build inside a clean Ubuntu container via Docker and drops the `.deb` and `SHA256SUMS` into `./output/`.
 
 ## Build dependencies
 
-The following packages are installed in the build container:
+The following packages are installed in the build environment:
 
 ```text
 build-essential wget ca-certificates fakeroot dpkg-dev
