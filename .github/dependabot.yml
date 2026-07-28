@@ -1,6 +1,5 @@
 version: 2
 updates:
-  # 1. GitHub Actions used in workflows
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
@@ -16,11 +15,7 @@ updates:
     commit-message:
       prefix: "ci"
       include: "scope"
-    labels:
-      - "dependencies"
-      - "ci"
 
-  # 2. Docker base images (ubuntu:22.04, ubuntu:26.04)
   - package-ecosystem: "docker"
     directory: "/"
     schedule:
@@ -32,6 +27,3 @@ updates:
     commit-message:
       prefix: "docker"
       include: "scope"
-    labels:
-      - "dependencies"
-      - "docker"
