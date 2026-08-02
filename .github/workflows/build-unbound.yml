@@ -274,7 +274,7 @@ jobs:
           cat "SHA256SUMS-${{ matrix.pkg_suffix }}"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: unbound-${{ needs.check-version.outputs.version }}-${{ matrix.pkg_suffix }}-amd64
           path: |
@@ -290,7 +290,7 @@ jobs:
       contents: write
     steps:
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: ./artifacts
           pattern: unbound-${{ needs.check-version.outputs.version }}-*
