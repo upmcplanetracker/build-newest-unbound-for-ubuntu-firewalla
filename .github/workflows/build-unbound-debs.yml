@@ -103,7 +103,6 @@ jobs:
 
           echo "Container OpenSSL version: ${OPENSSL_VER}"
 
-          # Unbound DoQ requires OpenSSL >= 3.5.0
           DOQ_SUPPORTED=false
           if [ "$OPENSSL_MAJOR" -gt 3 ] || { [ "$OPENSSL_MAJOR" -eq 3 ] && [ "$OPENSSL_MINOR" -ge 5 ]; }; then
             DOQ_SUPPORTED=true
@@ -206,14 +205,14 @@ jobs:
           echo ""
           echo "=== Config check (syntax only) ==="
           mkdir -p /tmp/unbound-pkg/etc/unbound
-          cat > /tmp/unbound-pkg/etc/unbound/unbound.conf <<'EOF'
-          server:
-              verbosity: 1
-              interface: 127.0.0.1
-              port: 53
-              username: "unbound"
-              directory: "/etc/unbound"
-EOF
+          {
+            echo 'server:'
+            echo '    verbosity: 1'
+            echo '    interface: 127.0.0.1'
+            echo '    port: 53'
+            echo '    username: "unbound"'
+            echo '    directory: "/etc/unbound"'
+          } > /tmp/unbound-pkg/etc/unbound/unbound.conf
           "${BIN}"-checkconf /tmp/unbound-pkg/etc/unbound/unbound.conf || true
 
       - name: Create .deb package
@@ -226,7 +225,6 @@ EOF
 
           mkdir -p "${DEB_DIR}/DEBIAN"
 
-          # Dynamically set libraries for t64 transitions on Ubuntu 24.04+ (including 26.04)
           if [ "${SUFFIX}" = "ubuntu26.04" ]; then
             LIBEVENT="libevent-2.1-7t64 | libevent-2.1-7"
             LIBHIREDIS="libhiredis1.1.0t64 | libhiredis1.1.0"
@@ -235,23 +233,23 @@ EOF
             LIBHIREDIS="libhiredis1.1.0"
           fi
 
-          cat > "${DEB_DIR}/DEBIAN/control" <<EOF
-Package: unbound
-Version: ${VERSION}-${SUFFIX}
-Section: net
-Priority: optional
-Architecture: ${ARCH}
-Maintainer: Automated Build <build@localhost>
-Depends: libc6, libssl3, libexpat1, ${LIBEVENT}, libnghttp2-14, libsystemd0, libprotobuf-c1, ${LIBHIREDIS}, libfstrm0, libsodium23, python3
-Description: Validating, recursive, caching DNS resolver
- Unbound is a validating, recursive, and caching DNS resolver.
- It is designed as a set of modular components that incorporate
- modern features, such as enhanced security (DNSSEC) validation,
- Internet Protocol Version 6 (IPv6), EDNS Client Subnet, DNS-over-HTTPS,
- DNS-over-QUIC (where supported), dnstap, Redis cachedb, and a client
- resolver library API as an integral part of the architecture.
- Built from upstream tarball for ${SUFFIX} with hardening flags.
-EOF
+          {
+            echo "Package: unbound"
+            echo "Version: ${VERSION}-${SUFFIX}"
+            echo "Section: net"
+            echo "Priority: optional"
+            echo "Architecture: ${ARCH}"
+            echo "Maintainer: Automated Build <build@localhost>"
+            echo "Depends: libc6, libssl3, libexpat1, ${LIBEVENT}, libnghttp2-14, libsystemd0, libprotobuf-c1, ${LIBHIREDIS}, libfstrm0, libsodium23, python3"
+            echo "Description: Validating, recursive, caching DNS resolver"
+            echo " Unbound is a validating, recursive, and caching DNS resolver."
+            echo " It is designed as a set of modular components that incorporate"
+            echo " modern features, such as enhanced security (DNSSEC) validation,"
+            echo " Internet Protocol Version 6 (IPv6), EDNS Client Subnet, DNS-over-HTTPS,"
+            echo " DNS-over-QUIC (where supported), dnstap, Redis cachedb, and a client"
+            echo " resolver library API as an integral part of the architecture."
+            echo " Built from upstream tarball for ${SUFFIX} with hardening flags."
+          } > "${DEB_DIR}/DEBIAN/control"
 
           cp -a "${PKG_DIR}/." "${DEB_DIR}/" 2>/dev/null || true
 
@@ -263,32 +261,32 @@ EOF
 
           if [ ! -f "${DEB_DIR}/lib/systemd/system/unbound.service" ] && [ ! -f "${DEB_DIR}/usr/lib/systemd/system/unbound.service" ]; then
             mkdir -p "${DEB_DIR}/lib/systemd/system"
-            cat > "${DEB_DIR}/lib/systemd/system/unbound.service" <<'EOF'
-[Unit]
-Description=Unbound DNS server
-Documentation=man:unbound(8)
-After=network.target
-Before=nss-lookup.target
-Wants=nss-lookup.target
-
-[Service]
-Type=simple
-EnvironmentFile=-/etc/default/unbound
-ExecStart=/usr/sbin/unbound -d $DAEMON_OPTS
-ExecReload=/usr/sbin/unbound-control reload
-Restart=on-failure
-
-[Install]
-WantedBy=multi-user.target
-EOF
+            {
+              echo "[Unit]"
+              echo "Description=Unbound DNS server"
+              echo "Documentation=man:unbound(8)"
+              echo "After=network.target"
+              echo "Before=nss-lookup.target"
+              echo "Wants=nss-lookup.target"
+              echo ""
+              echo "[Service]"
+              echo "Type=simple"
+              echo "EnvironmentFile=-/etc/default/unbound"
+              echo 'ExecStart=/usr/sbin/unbound -d $DAEMON_OPTS'
+              echo "ExecReload=/usr/sbin/unbound-control reload"
+              echo "Restart=on-failure"
+              echo ""
+              echo "[Install]"
+              echo "WantedBy=multi-user.target"
+            } > "${DEB_DIR}/lib/systemd/system/unbound.service"
           fi
 
           mkdir -p "${DEB_DIR}/etc/default"
           if [ ! -f "${DEB_DIR}/etc/default/unbound" ]; then
-            cat > "${DEB_DIR}/etc/default/unbound" <<'EOF'
-# Options for unbound
-DAEMON_OPTS=""
-EOF
+            {
+              echo "# Options for unbound"
+              echo 'DAEMON_OPTS=""'
+            } > "${DEB_DIR}/etc/default/unbound"
           fi
 
           mkdir -p "${DEB_DIR}/etc/ld.so.conf.d"
@@ -296,16 +294,15 @@ EOF
             echo "/usr/local/lib" > "${DEB_DIR}/etc/ld.so.conf.d/local-ngtcp2.conf"
           fi
 
-          # Post-installation script to auto-setup system user and chroot directory
-          cat > "${DEB_DIR}/DEBIAN/postinst" <<'EOF'
-#!/bin/sh
-set -e
-if [ "$1" = "configure" ]; then
-  id -u unbound >/dev/null 2>&1 || useradd -r -s /bin/false unbound
-  mkdir -p /var/run/unbound
-  chown -R unbound:unbound /var/run/unbound
-fi
-EOF
+          {
+            echo "#!/bin/sh"
+            echo "set -e"
+            echo 'if [ "$1" = "configure" ]; then'
+            echo "  id -u unbound >/dev/null 2>&1 || useradd -r -s /bin/false unbound"
+            echo "  mkdir -p /var/run/unbound"
+            echo "  chown -R unbound:unbound /var/run/unbound"
+            echo "fi"
+          } > "${DEB_DIR}/DEBIAN/postinst"
           chmod 0755 "${DEB_DIR}/DEBIAN/postinst"
 
           dpkg-deb --root-owner-group --build "${DEB_DIR}" "/tmp/unbound_${VERSION}-${SUFFIX}_${ARCH}.deb"
