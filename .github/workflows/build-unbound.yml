@@ -8,7 +8,6 @@ on:
       force_version:
         description: 'Force build a specific version (e.g., 1.25.2)'
         required: false
-        default: ''
 
 env:
   UPSTREAM_REPO: NLnetLabs/unbound
