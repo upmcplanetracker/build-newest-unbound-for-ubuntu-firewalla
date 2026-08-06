@@ -138,6 +138,16 @@ docker run --rm \
 
     mkdir -p "${DEB_DIR}/DEBIAN"
 
+    # Select proper library dependencies based on Ubuntu release (handling 64-bit time_t transition)
+    MAJOR_VER=$(echo "${UBUNTU_VERSION}" | cut -d. -f1)
+    if [ "${MAJOR_VER}" -ge 24 ]; then
+      LIBEVENT="libevent-2.1-7t64 | libevent-2.1-7"
+      LIBHIREDIS="libhiredis1.1.0t64 | libhiredis1.1.0"
+    else
+      LIBEVENT="libevent-2.1-7"
+      LIBHIREDIS="libhiredis1.1.0"
+    fi
+
     cat > "${DEB_DIR}/DEBIAN/control" <<EOF
 Package: unbound
 Version: ${VERSION}-${SUFFIX}
@@ -145,7 +155,7 @@ Section: net
 Priority: optional
 Architecture: ${ARCH}
 Maintainer: Automated Build <build@localhost>
-Depends: libc6, libssl3, libexpat1, libevent-2.1-7, libnghttp2-14, libsystemd0, libprotobuf-c1, libhiredis1.1.0 | libhiredis1.1.0+ | libhiredis1.1.0-dev | libhiredis1.1.0t64, libfstrm0, libsodium23, python3
+Depends: libc6, libssl3, libexpat1, ${LIBEVENT}, libnghttp2-14, libsystemd0, libprotobuf-c1, ${LIBHIREDIS}, libfstrm0, libsodium23, python3
 Description: Validating, recursive, caching DNS resolver
  Unbound is a validating, recursive, and caching DNS resolver.
  Built from upstream tarball for Ubuntu ${UBUNTU_VERSION} with hardening flags.
@@ -190,6 +200,18 @@ DEFEOF
       mkdir -p "${DEB_DIR}/etc/ld.so.conf.d"
       echo "/usr/local/lib" > "${DEB_DIR}/etc/ld.so.conf.d/local-ngtcp2.conf"
     fi
+
+    # Post-installation script to auto-setup system user and chroot directory
+    cat > "${DEB_DIR}/DEBIAN/postinst" <<'POSTINSTEOF'
+#!/bin/sh
+set -e
+if [ "$1" = "configure" ]; then
+  id -u unbound >/dev/null 2>&1 || useradd -r -s /bin/false unbound
+  mkdir -p /var/run/unbound
+  chown -R unbound:unbound /var/run/unbound
+fi
+POSTINSTEOF
+    chmod 0755 "${DEB_DIR}/DEBIAN/postinst"
 
     dpkg-deb --root-owner-group --build "${DEB_DIR}" \
       "/tmp/unbound_${VERSION}-${SUFFIX}_${ARCH}.deb"
