@@ -31,7 +31,9 @@ jobs:
           if [ -n "${{ github.event.inputs.force_version }}" ]; then
             VERSION="${{ github.event.inputs.force_version }}"
           else
-            VERSION=$(curl -sSL "https://api.github.com/repos/${{ env.UPSTREAM_REPO }}/releases/latest" |               jq -r '.tag_name' |               sed 's/^release-//')
+            VERSION=$(curl -sSL "https://api.github.com/repos/${{ env.UPSTREAM_REPO }}/releases/latest" | \
+                      jq -r '.tag_name' | \
+                      sed 's/^release-//')
           fi
 
           UPSTREAM_TAG="release-${VERSION}"
@@ -84,14 +86,21 @@ jobs:
         run: |
           export DEBIAN_FRONTEND=noninteractive
           apt-get update
-          apt-get install -y --no-install-recommends             build-essential wget ca-certificates fakeroot dpkg-dev             libssl-dev libexpat1-dev libevent-dev libnghttp2-dev             libsystemd-dev libprotobuf-c-dev protobuf-c-compiler             libhiredis-dev libfstrm-dev libsodium-dev             python3 python3-dev swig doxygen             autoconf automake libtool pkg-config git             bison flex
+          apt-get install -y --no-install-recommends \
+            build-essential wget ca-certificates fakeroot dpkg-dev \
+            libssl-dev libexpat1-dev libevent-dev libnghttp2-dev \
+            libsystemd-dev libprotobuf-c-dev protobuf-c-compiler \
+            libhiredis-dev libfstrm-dev libsodium-dev \
+            python3 python3-dev swig doxygen \
+            autoconf automake libtool pkg-config git \
+            bison flex
 
       - name: Check OpenSSL version and build ngtcp2 from source
+        id: build-ngtcp2
         run: |
           OPENSSL_VER=$(openssl version | awk '{print $2}')
           OPENSSL_MAJOR=$(echo "$OPENSSL_VER" | cut -d. -f1)
           OPENSSL_MINOR=$(echo "$OPENSSL_VER" | cut -d. -f2)
-          OPENSSL_PATCH=$(echo "$OPENSSL_VER" | cut -d. -f3)
 
           echo "Container OpenSSL version: ${OPENSSL_VER}"
 
@@ -104,19 +113,19 @@ jobs:
           if [ "$DOQ_SUPPORTED" = "true" ]; then
             echo "OpenSSL ${OPENSSL_VER} >= 3.5.0 — building ngtcp2 from source for DoQ support"
 
-            # Build ngtcp2 from source against this container's exact OpenSSL.
-            # We use --enable-lib-only to skip examples (which need nghttp3/libev).
-            # The crypto helper (libngtcp2_crypto_openssl) is built with --with-openssl.
             git clone --depth 1 -b ${{ env.NGTCP2_VERSION }} https://github.com/ngtcp2/ngtcp2 /tmp/ngtcp2-src
             cd /tmp/ngtcp2-src
             git submodule update --init --recursive
             autoreconf -i
-            ./configure               --prefix=/usr/local               --enable-lib-only               --with-openssl               --disable-static
+            ./configure \
+              --prefix=/usr/local \
+              --enable-lib-only \
+              --with-openssl \
+              --disable-static
             make -j$(nproc)
             make install
             ldconfig
 
-            # Verify the crypto helper was built
             if [ -f /usr/local/lib/libngtcp2_crypto_openssl.so ]; then
               echo "ngtcp2 crypto helper built successfully"
               echo "doq_enabled=true" >> $GITHUB_OUTPUT
@@ -134,7 +143,8 @@ jobs:
           TARBALL_URL="${{ needs.check-version.outputs.tarball_url }}"
           VERSION="${{ needs.check-version.outputs.version }}"
           echo "Downloading from: ${TARBALL_URL}"
-          wget --retry-connrefused --waitretry=1 --read-timeout=20 --timeout=15 -t 5             -q "$TARBALL_URL" -O "unbound-${VERSION}.tar.gz"
+          wget --retry-connrefused --waitretry=1 --read-timeout=20 --timeout=15 -t 5 \
+            -q "$TARBALL_URL" -O "unbound-${VERSION}.tar.gz"
           tar xzf "unbound-${VERSION}.tar.gz"
           ls -la "unbound-${VERSION}/"
 
@@ -143,10 +153,8 @@ jobs:
           VERSION="${{ needs.check-version.outputs.version }}"
           cd "unbound-${VERSION}"
 
-          # Tell configure which Python to use (Ubuntu only ships python3)
           export PYTHON_VERSION=3
 
-          # Conditionally enable DoQ if ngtcp2 was built from source
           DOQ_FLAGS=""
           if [ "${{ steps.build-ngtcp2.outputs.doq_enabled }}" = "true" ]; then
             DOQ_FLAGS="--with-libngtcp2"
@@ -155,7 +163,31 @@ jobs:
             echo "DNS-over-QUIC disabled for this build"
           fi
 
-          ./configure             --prefix=/usr             --sysconfdir=/etc             --localstatedir=/var             --with-run-dir=/var/run/unbound             --with-username=unbound             --with-libevent             --with-libnghttp2             --with-ssl             --with-libhiredis             --enable-cachedb             --enable-dnscrypt             --enable-dnstap             --enable-subnet             --enable-ipsecmod             --enable-tfo-client             --enable-tfo-server             --enable-systemd             --enable-pie             --with-pythonmodule             --with-pyunbound             --disable-rpath             ${DOQ_FLAGS}             CFLAGS="-O2 -D_FORTIFY_SOURCE=2 -fstack-protector-strong -fPIE"             LDFLAGS="-Wl,-z,relro,-z,now -pie"
+          ./configure \
+            --prefix=/usr \
+            --sysconfdir=/etc \
+            --localstatedir=/var \
+            --with-run-dir=/var/run/unbound \
+            --with-username=unbound \
+            --with-libevent \
+            --with-libnghttp2 \
+            --with-ssl \
+            --with-libhiredis \
+            --enable-cachedb \
+            --enable-dnscrypt \
+            --enable-dnstap \
+            --enable-subnet \
+            --enable-ipsecmod \
+            --enable-tfo-client \
+            --enable-tfo-server \
+            --enable-systemd \
+            --enable-pie \
+            --with-pythonmodule \
+            --with-pyunbound \
+            --disable-rpath \
+            ${DOQ_FLAGS} \
+            CFLAGS="-O2 -D_FORTIFY_SOURCE=2 -fstack-protector-strong -fPIE" \
+            LDFLAGS="-Wl,-z,relro,-z,now -pie"
 
           make -j$(nproc)
           mkdir -p /tmp/unbound-pkg
@@ -163,7 +195,6 @@ jobs:
 
       - name: Verify build and modules
         run: |
-          VERSION="${{ needs.check-version.outputs.version }}"
           BIN="/tmp/unbound-pkg/usr/sbin/unbound"
 
           echo "=== Unbound version and modules ==="
@@ -183,7 +214,7 @@ jobs:
               port: 53
               username: "unbound"
               directory: "/etc/unbound"
-          EOF
+EOF
           "${BIN}"-checkconf /tmp/unbound-pkg/etc/unbound/unbound.conf || true
 
       - name: Create .deb package
@@ -196,28 +227,35 @@ jobs:
 
           mkdir -p "${DEB_DIR}/DEBIAN"
 
+          # Dynamically set libraries for t64 transitions on Ubuntu 24.04+ (including 26.04)
+          if [ "${SUFFIX}" = "ubuntu26.04" ]; then
+            LIBEVENT="libevent-2.1-7t64 | libevent-2.1-7"
+            LIBHIREDIS="libhiredis1.1.0t64 | libhiredis1.1.0"
+          else
+            LIBEVENT="libevent-2.1-7"
+            LIBHIREDIS="libhiredis1.1.0"
+          fi
+
           cat > "${DEB_DIR}/DEBIAN/control" <<EOF
-          Package: unbound
-          Version: ${VERSION}-${SUFFIX}
-          Section: net
-          Priority: optional
-          Architecture: ${ARCH}
-          Maintainer: Automated Build <build@localhost>
-          Depends: libc6, libssl3, libexpat1, libevent-2.1-7, libnghttp2-14, libsystemd0, libprotobuf-c1, libhiredis1.1.0 | libhiredis1.1.0+ | libhiredis1.1.0-dev | libhiredis1.1.0t64, libfstrm0, libsodium23, python3
-          Description: Validating, recursive, caching DNS resolver
-           Unbound is a validating, recursive, and caching DNS resolver.
-           It is designed as a set of modular components that incorporate
-           modern features, such as enhanced security (DNSSEC) validation,
-           Internet Protocol Version 6 (IPv6), EDNS Client Subnet, DNS-over-HTTPS,
-           DNS-over-QUIC (where supported), dnstap, Redis cachedb, and a client
-           resolver library API as an integral part of the architecture.
-           Built from upstream tarball for ${SUFFIX} with hardening flags.
-          EOF
+Package: unbound
+Version: ${VERSION}-${SUFFIX}
+Section: net
+Priority: optional
+Architecture: ${ARCH}
+Maintainer: Automated Build <build@localhost>
+Depends: libc6, libssl3, libexpat1, ${LIBEVENT}, libnghttp2-14, libsystemd0, libprotobuf-c1, ${LIBHIREDIS}, libfstrm0, libsodium23, python3
+Description: Validating, recursive, caching DNS resolver
+ Unbound is a validating, recursive, and caching DNS resolver.
+ It is designed as a set of modular components that incorporate
+ modern features, such as enhanced security (DNSSEC) validation,
+ Internet Protocol Version 6 (IPv6), EDNS Client Subnet, DNS-over-HTTPS,
+ DNS-over-QUIC (where supported), dnstap, Redis cachedb, and a client
+ resolver library API as an integral part of the architecture.
+ Built from upstream tarball for ${SUFFIX} with hardening flags.
+EOF
 
           cp -a "${PKG_DIR}/." "${DEB_DIR}/" 2>/dev/null || true
 
-          # If DoQ was built, ngtcp2 libs were installed to /usr/local/lib.
-          # Bundle them into the .deb so the package is self-contained.
           if [ -f /usr/local/lib/libngtcp2.so ]; then
             echo "Bundling ngtcp2 libraries into .deb"
             mkdir -p "${DEB_DIR}/usr/local/lib"
@@ -227,40 +265,51 @@ jobs:
           if [ ! -f "${DEB_DIR}/lib/systemd/system/unbound.service" ] && [ ! -f "${DEB_DIR}/usr/lib/systemd/system/unbound.service" ]; then
             mkdir -p "${DEB_DIR}/lib/systemd/system"
             cat > "${DEB_DIR}/lib/systemd/system/unbound.service" <<'EOF'
-          [Unit]
-          Description=Unbound DNS server
-          Documentation=man:unbound(8)
-          After=network.target
-          Before=nss-lookup.target
-          Wants=nss-lookup.target
+[Unit]
+Description=Unbound DNS server
+Documentation=man:unbound(8)
+After=network.target
+Before=nss-lookup.target
+Wants=nss-lookup.target
 
-          [Service]
-          Type=simple
-          EnvironmentFile=-/etc/default/unbound
-          ExecStart=/usr/sbin/unbound -d $DAEMON_OPTS
-          ExecReload=/usr/sbin/unbound-control reload
-          Restart=on-failure
+[Service]
+Type=simple
+EnvironmentFile=-/etc/default/unbound
+ExecStart=/usr/sbin/unbound -d $DAEMON_OPTS
+ExecReload=/usr/sbin/unbound-control reload
+Restart=on-failure
 
-          [Install]
-          WantedBy=multi-user.target
-          EOF
+[Install]
+WantedBy=multi-user.target
+EOF
           fi
 
           mkdir -p "${DEB_DIR}/etc/default"
           if [ ! -f "${DEB_DIR}/etc/default/unbound" ]; then
             cat > "${DEB_DIR}/etc/default/unbound" <<'EOF'
-          # Options for unbound
-          DAEMON_OPTS=""
-          EOF
+# Options for unbound
+DAEMON_OPTS=""
+EOF
           fi
 
-          # Add ldconfig hook so /usr/local/lib is searchable at runtime
           mkdir -p "${DEB_DIR}/etc/ld.so.conf.d"
           if [ -f /usr/local/lib/libngtcp2.so ]; then
             echo "/usr/local/lib" > "${DEB_DIR}/etc/ld.so.conf.d/local-ngtcp2.conf"
           fi
 
-          dpkg-deb --root-owner-group --build "${DEB_DIR}"             "/tmp/unbound_${VERSION}-${SUFFIX}_${ARCH}.deb"
+          # Post-installation script to auto-setup system user and chroot directory
+          cat > "${DEB_DIR}/DEBIAN/postinst" <<'EOF'
+#!/bin/sh
+set -e
+if [ "$1" = "configure" ]; then
+  id -u unbound >/dev/null 2>&1 || useradd -r -s /bin/false unbound
+  mkdir -p /var/run/unbound
+  chown -R unbound:unbound /var/run/unbound
+fi
+EOF
+          chmod 0755 "${DEB_DIR}/DEBIAN/postinst"
+
+          dpkg-deb --root-owner-group --build "${DEB_DIR}" "/tmp/unbound_${VERSION}-${SUFFIX}_${ARCH}.deb"
 
           echo "=== Package info ==="
           dpkg-deb -I "/tmp/unbound_${VERSION}-${SUFFIX}_${ARCH}.deb"
@@ -316,19 +365,9 @@ jobs:
             | `unbound_${{ needs.check-version.outputs.version }}-ubuntu22.04_amd64.deb` | Ubuntu 22.04 (Jammy) |
             | `unbound_${{ needs.check-version.outputs.version }}-ubuntu26.04_amd64.deb` | Ubuntu 26.04 |
 
-            **Firewalla note:** The Ubuntu 22.04 package should also work on 26.04 due to glibc backward compatibility. Install with:
+            **Installation:**
             ```bash
-            sudo dpkg -i unbound_*.deb
-            # or
             sudo apt install ./unbound_*.deb
-            ```
-
-            **Post-install:** Ensure the `unbound` user exists before starting the service:
-            ```bash
-            sudo useradd -r -s /bin/false unbound 2>/dev/null || true
-            sudo mkdir -p /var/run/unbound
-            sudo chown unbound:unbound /var/run/unbound
-            sudo systemctl enable --now unbound
             ```
 
             **Verify the package:**
