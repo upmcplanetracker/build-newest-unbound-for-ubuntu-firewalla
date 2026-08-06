@@ -9,6 +9,9 @@ on:
         description: 'Force build a specific version (e.g., 1.25.2)'
         required: false
 
+permissions:
+  contents: read
+
 env:
   UPSTREAM_REPO: NLnetLabs/unbound
   DOWNLOAD_BASE: https://nlnetlabs.nl/downloads/unbound
